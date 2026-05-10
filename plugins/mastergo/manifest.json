@@ -1,0 +1,11 @@
+{
+  "name": "Mg to Fig Exporter",
+  "id": "mg-to-fig-exporter",
+  "api": "1.0.0",
+  "main": "src/main.js",
+  "ui": "src/ui.html",
+  "editorType": ["mastergo"],
+  "networkAccess": {
+    "allowedDomains": ["none"]
+  }
+}

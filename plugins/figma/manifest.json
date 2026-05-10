@@ -1,0 +1,11 @@
+{
+  "name": "Mg to Fig Importer",
+  "id": "mg-to-fig-importer",
+  "api": "1.0.0",
+  "main": "src/main.js",
+  "ui": "src/ui.html",
+  "editorType": ["figma"],
+  "networkAccess": {
+    "allowedDomains": ["https://image-resource.mastergo.com"]
+  }
+}

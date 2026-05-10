@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Fig Import</title>
+    <style>
+      body {
+        font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 16px;
+      }
+      textarea {
+        width: 100%;
+        min-height: 150px;
+        margin-bottom: 8px;
+      }
+      button {
+        width: 100%;
+        margin-bottom: 8px;
+        padding: 8px;
+      }
+      pre {
+        background: #f6f6f6;
+        padding: 8px;
+        max-height: 100px;
+        overflow: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <textarea id="json" placeholder="粘贴导出的 document JSON"></textarea>
+    <button id="import">开始导入</button>
+    <button id="close">关闭</button>
+    <pre id="status">等待导入…</pre>
+    <script>
+      const status = document.getElementById("status");
+      const jsonInput = document.getElementById("json");
+
+      document.getElementById("import").onclick = () => {
+        try {
+          const document = JSON.parse(jsonInput.value);
+          parent.postMessage(
+            {
+              pluginMessage: {
+                type: "import:start",
+                payload: {
+                  document,
+                  fontRuleSet: {
+                    exact: {},
+                    family: {}
+                  }
+                }
+              }
+            },
+            "*"
+          );
+        } catch (error) {
+          status.textContent = `JSON 解析失败: ${error.message}`;
+        }
+      };
+
+      document.getElementById("close").onclick = () => {
+        parent.postMessage({ pluginMessage: { type: "close" } }, "*");
+      };
+
+      window.onmessage = (event) => {
+        const message = event.data.pluginMessage;
+        if (!message) return;
+        if (message.type === "import:result") {
+          status.textContent = `导入完成: created=${message.payload.createdCount}, diagnostics=${message.payload.diagnostics.length}`;
+        }
+        if (message.type === "import:error") {
+          status.textContent = `导入失败: ${message.payload.message}`;
+        }
+      };
+    </script>
+  </body>
+</html>
