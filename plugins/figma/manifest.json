@@ -5,6 +5,23 @@
   "main": "src/main.js",
   "ui": "src/ui.html",
   "editorType": ["figma"],
+  "menu": [
+    {
+      "name": "导入 Mg-to-Fig JSON",
+      "command": "import:ui"
+    },
+    {
+      "separator": true
+    },
+    {
+      "name": "修复当前选区",
+      "command": "postprocess:selection"
+    },
+    {
+      "name": "修复当前选区（保留标记名）",
+      "command": "postprocess:keep-names"
+    }
+  ],
   "networkAccess": {
     "allowedDomains": ["https://image-resource.mastergo.com"]
   }

@@ -44,6 +44,8 @@
   - `itemSpacing`: number
 - `style`:
   - `fills`: array
+    - 普通 Figma paint 可直接透传
+    - 图片资源使用 `{ "type": "IMAGE_REF", "assetId": "...", "scaleMode": "FILL" }`，通过 `assets[]` 解析
   - `strokes`: array
   - `effects`: array
   - `opacity`: number
@@ -80,6 +82,8 @@
 - `uri`: string（external/chunked）
 - `data`: string（inline，base64）
 - `checksum`: string（可选）
+- `width`: number | null（可选）
+- `height`: number | null（可选）
 
 ## 5. tokens[]
 

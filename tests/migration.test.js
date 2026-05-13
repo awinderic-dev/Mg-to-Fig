@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 
 import { exportFromMasterGo } from "../plugins/mastergo/src/exporter.js";
 import { exportFromDslPayload } from "../plugins/mastergo/src/dsl-adapter.js";
-import { buildParameterDiffReport, importToFigma } from "../plugins/figma/src/importer.js";
+import {
+  buildFontPreflightReport,
+  buildImportPreflightReport,
+  buildParameterDiffReport,
+  createImportSession,
+  importToFigma
+} from "../plugins/figma/src/importer.js";
+import { postprocessMasterGoNodes } from "../plugins/figma/src/postprocess.js";
 
 function createMockNode(type) {
   return {
@@ -11,12 +18,28 @@ function createMockNode(type) {
     name: type,
     children: [],
     layoutMode: "NONE",
+    layoutWrap: "NO_WRAP",
     primaryAxisSizingMode: "FIXED",
     counterAxisSizingMode: "FIXED",
     primaryAxisAlignItems: "MIN",
     counterAxisAlignItems: "MIN",
+    counterAxisAlignContent: "AUTO",
+    layoutSizingHorizontal: "FIXED",
+    layoutSizingVertical: "FIXED",
     layoutGrow: 0,
     layoutAlign: "INHERIT",
+    layoutPositioning: "AUTO",
+    itemSpacing: 0,
+    counterAxisSpacing: 0,
+    paddingTop: 0,
+    paddingRight: 0,
+    paddingBottom: 0,
+    paddingLeft: 0,
+    fills: [],
+    strokes: [],
+    effects: [],
+    opacity: 1,
+    cornerRadius: 0,
     x: 0,
     y: 0,
     resize(width, height) {
@@ -25,10 +48,31 @@ function createMockNode(type) {
     },
     appendChild(child) {
       this.children.push(child);
+      child.parent = this;
+    },
+    insertChild(index, child) {
+      const existing = this.children.indexOf(child);
+      if (existing !== -1) this.children.splice(existing, 1);
+      this.children.splice(index, 0, child);
+      child.parent = this;
     },
     setPluginData(key, value) {
       this.pluginData = this.pluginData ?? {};
       this.pluginData[key] = value;
+    },
+    getPluginData(key) {
+      return this.pluginData?.[key] ?? "";
+    },
+    findAll(predicate) {
+      const found = [];
+      const visit = (current) => {
+        for (const child of current.children ?? []) {
+          if (predicate(child)) found.push(child);
+          visit(child);
+        }
+      };
+      visit(this);
+      return found;
     },
     remove() {
       this.removed = true;
@@ -43,6 +87,8 @@ function setupFigmaMock() {
     createText: () => ({ ...createMockNode("TEXT"), characters: "" }),
     createRectangle: () => createMockNode("RECTANGLE"),
     createVector: () => createMockNode("VECTOR"),
+    createImage: () => ({ hash: "inline-image-hash" }),
+    createImageAsync: async () => ({ hash: "remote-image-hash" }),
     createComponent: () => ({
       ...createMockNode("COMPONENT"),
       createInstance() {
@@ -50,7 +96,11 @@ function setupFigmaMock() {
       }
     }),
     group: () => createMockNode("GROUP"),
-    loadFontAsync: async () => undefined
+    loadFontAsync: async () => undefined,
+    listAvailableFontsAsync: async () => [
+      { fontName: { family: "Inter", style: "Regular" } },
+      { fontName: { family: "PingFang SC", style: "Regular" } }
+    ]
   };
 }
 
@@ -167,6 +217,295 @@ test("importToFigma should support batch import", async () => {
   assert.equal(result.createdNodes.length, 2);
 });
 
+test("exportFromMasterGo should collect image URL fills into assets", () => {
+  const { document, validation } = exportFromMasterGo({
+    roots: [
+      {
+        id: "image-card",
+        type: "RECTANGLE",
+        name: "Image Card",
+        fills: [{ type: "IMAGE_URL", url: "https://image-resource.mastergo.com/card.png", scaleMode: "FILL" }],
+        children: []
+      }
+    ]
+  });
+
+  assert.equal(validation.valid, true);
+  assert.equal(document.assets.length, 1);
+  assert.equal(document.assets[0].transport, "external");
+  assert.equal(document.assets[0].uri, "https://image-resource.mastergo.com/card.png");
+  assert.equal(document.nodes[0].style.fills[0].type, "IMAGE_REF");
+  assert.equal(document.nodes[0].style.fills[0].assetId, document.assets[0].id);
+});
+
+test("exportFromMasterGo should normalize MasterGo image fills into assets", () => {
+  const { document, validation } = exportFromMasterGo({
+    roots: [
+      {
+        id: "image-fill",
+        type: "RECTANGLE",
+        name: "Image Fill",
+        fills: [{
+          type: "IMAGE",
+          imageRef: "104581334761000/166632337784586/image.png",
+          scaleMode: "FILL"
+        }],
+        children: []
+      }
+    ]
+  });
+
+  assert.equal(validation.valid, true);
+  assert.equal(document.assets.length, 1);
+  assert.equal(document.assets[0].uri, "https://image-resource.mastergo.com/104581334761000/166632337784586/image.png");
+  assert.equal(document.nodes[0].style.fills[0].type, "IMAGE_REF");
+});
+
+test("exportFromMasterGo should prefer image fills when node raster export failed", () => {
+  const { document, validation } = exportFromMasterGo({
+    roots: [
+      {
+        id: "image-fill",
+        type: "RECTANGLE",
+        name: "Image Fill",
+        image: { error: "export failed" },
+        fills: [{
+          type: "IMAGE",
+          imageRef: "104581334761000/166632337784586/image.png",
+          scaleMode: "FILL"
+        }],
+        children: []
+      }
+    ]
+  });
+
+  assert.equal(validation.valid, true);
+  assert.equal(document.assets.length, 1);
+  assert.equal(document.nodes[0].imageRef, null);
+  assert.equal(document.nodes[0].style.fills[0].type, "IMAGE_REF");
+  assert.equal(document.diagnostics.some((item) => item.code === "E_ASSET_MISSING"), false);
+});
+
+
+test("exportFromMasterGo should skip PAGE root and keep children top-level", () => {
+  const { document, validation } = exportFromMasterGo({
+    roots: [
+      {
+        id: "M",
+        type: "PAGE",
+        name: "Page",
+        children: [
+          { id: "frame1", type: "FRAME", name: "Frame", children: [] }
+        ]
+      }
+    ],
+    documentMeta: {
+      sourceFileId: 192800492121887,
+      sourcePageId: "M",
+      sourcePageName: "页面 1"
+    }
+  });
+
+  assert.equal(validation.valid, true);
+  assert.equal(document.documentMeta.sourceFileId, "192800492121887");
+  assert.equal(document.nodes.length, 1);
+  assert.equal(document.nodes[0].id, "frame1");
+  assert.equal(document.nodes[0].parentId, null);
+  assert.equal(document.diagnostics.some((item) => item.nodeId === "M"), false);
+});
+
+test("exportFromMasterGo should downgrade PEN/POLYGON raster fallbacks to images", () => {
+  const { document, validation } = exportFromMasterGo({
+    roots: [
+      {
+        id: "pen1",
+        type: "PEN",
+        name: "Pen Icon",
+        image: {
+          id: "pen1-image",
+          base64: "aGVsbG8=",
+          sizeBytes: 5,
+          width: 16,
+          height: 16
+        },
+        children: []
+      }
+    ]
+  });
+
+  assert.equal(validation.valid, true);
+  assert.equal(document.nodes[0].type, "IMAGE");
+  assert.equal(document.nodes[0].imageRef, "pen1-image");
+  assert.equal(document.assets.length, 1);
+  assert.ok(document.diagnostics.some((item) => item.message.includes("downgraded to IMAGE")));
+});
+
+test("exportFromMasterGo should keep PEN path data when available", () => {
+  const { document, validation } = exportFromMasterGo({
+    roots: [
+      {
+        id: "pen1",
+        type: "PEN",
+        name: "Pen Icon",
+        vectorPaths: [{ windingRule: "NONZERO", data: "M0 0 L10 10" }],
+        children: []
+      }
+    ]
+  });
+
+  assert.equal(validation.valid, true);
+  assert.equal(document.nodes[0].type, "VECTOR");
+  assert.equal(document.nodes[0].vectorPaths.length, 1);
+  assert.ok(document.diagnostics.some((item) => item.message.includes("downgraded to VECTOR")));
+});
+
+test("exportFromMasterGo should require raster fallback for empty PEN/POLYGON", () => {
+  const { document } = exportFromMasterGo({
+    roots: [
+      { id: "pen1", type: "PEN", name: "Empty Pen", children: [] }
+    ]
+  });
+
+  assert.equal(document.nodes[0].type, "IMAGE");
+  assert.equal(document.nodes[0].imageRef, null);
+  assert.equal(document.nodes[0].vectorPaths.length, 0);
+  assert.ok(document.diagnostics.some((item) => item.code === "E_ASSET_MISSING"));
+});
+
+test("exportFromMasterGo should not crash when raster fallback reports an error", () => {
+  const { document, validation } = exportFromMasterGo({
+    roots: [
+      {
+        id: "pen1",
+        type: "PEN",
+        name: "Broken Pen",
+        image: { error: "exportAsync(PNG): not supported" },
+        children: []
+      }
+    ]
+  });
+
+  assert.equal(validation.valid, true);
+  assert.equal(document.nodes[0].type, "IMAGE");
+  assert.equal(document.nodes[0].imageRef, null);
+  assert.equal(document.assets.length, 0);
+  assert.ok(document.diagnostics.some((item) => item.details.exportError.includes("not supported")));
+});
+
+test("importToFigma should resolve IMAGE_REF fills from assets", async () => {
+  setupFigmaMock();
+  const { document } = exportFromMasterGo({
+    roots: [
+      {
+        id: "image-card",
+        type: "RECTANGLE",
+        name: "Image Card",
+        fills: [{ type: "IMAGE_URL", url: "https://image-resource.mastergo.com/card.png", scaleMode: "FIT" }],
+        children: []
+      }
+    ]
+  });
+
+  const result = await importToFigma({ document });
+  const imported = result.createdNodes.find((node) => node.name === "Image Card");
+  assert.ok(imported);
+  assert.equal(imported.fills[0].type, "IMAGE");
+  assert.equal(imported.fills[0].imageHash, "remote-image-hash");
+  assert.equal(imported.fills[0].scaleMode, "FIT");
+});
+
+test("importToFigma should keep parent mapping across batch calls", async () => {
+  setupFigmaMock();
+  const session = createImportSession();
+  const { document } = exportFromMasterGo({
+    roots: [
+      {
+        id: "root",
+        type: "FRAME",
+        name: "Root",
+        children: [
+          { id: "child1", type: "FRAME", name: "Child 1", children: [] },
+          { id: "child2", type: "FRAME", name: "Child 2", children: [] }
+        ]
+      }
+    ]
+  });
+
+  await importToFigma({ document, batch: { offset: 0, limit: 1 }, session });
+  const second = await importToFigma({ document, batch: { offset: 1, limit: 1 }, session });
+  const child = second.createdNodes[0];
+
+  assert.equal(child.name, "Child 1");
+  assert.equal(child.parent.name, "Root");
+});
+
+test("buildFontPreflightReport should report fallback fonts", () => {
+  const { document } = exportFromMasterGo({
+    roots: [
+      {
+        id: "text1",
+        type: "TEXT",
+        name: "Title",
+        characters: "Hello",
+        fontFamily: "Missing Font",
+        fontStyle: "Bold",
+        children: []
+      }
+    ]
+  });
+
+  const report = buildFontPreflightReport(document, {}, [{ family: "Inter", style: "Regular" }]);
+
+  assert.equal(report.requestedFonts.length, 1);
+  assert.equal(report.fallbackCount, 1);
+  assert.equal(report.requestedFonts[0].resolved.family, "Inter");
+});
+
+test("buildImportPreflightReport should flag risky assets", () => {
+  const document = {
+    schemaVersion: "0.1.0",
+    documentMeta: {
+      sourceTool: "mastergo",
+      exportMode: "selection",
+      exportedAt: "2026-01-01T00:00:00.000Z",
+      sourceFileId: "file",
+      sourcePageId: "page",
+      sourcePageName: "page"
+    },
+    nodes: [
+      {
+        id: "n1",
+        type: "RECTANGLE",
+        name: "Image",
+        children: [],
+        geometry: { x: 0, y: 0, width: 10, height: 10, rotation: 0 },
+        style: { fills: [{ type: "IMAGE_REF", assetId: "missing" }], strokes: [], effects: [], opacity: 1 }
+      }
+    ],
+    assets: [
+      {
+        id: "large",
+        type: "image",
+        mimeType: "image/png",
+        sizeBytes: 10,
+        transport: "external",
+        uri: "https://image-resource.mastergo.com/large.png",
+        data: null,
+        width: 5000,
+        height: 100
+      }
+    ],
+    tokens: [],
+    diagnostics: []
+  };
+
+  const report = buildImportPreflightReport(document);
+
+  assert.equal(report.nodeCount, 1);
+  assert.equal(report.missingAssetRefs.length, 1);
+  assert.equal(report.oversizedImageAssets.length, 1);
+});
+
 test("importToFigma should apply auto layout sizing and child grow", async () => {
   setupFigmaMock();
   const { document } = exportFromMasterGo({
@@ -250,6 +589,138 @@ test("buildParameterDiffReport should report mismatches", () => {
   assert.equal(report.missingInTarget.length, 0);
   assert.ok(report.mismatches.some((m) => m.nodeId === "n1"));
   assert.ok(report.mismatches.some((m) => m.nodeId === "n2"));
+});
+
+test("postprocessMasterGoNodes should restore layout from name markers", () => {
+  const root = createMockNode("FRAME");
+  root.id = "root";
+  root.name = "容器[ay-vnssffffa[24][0][36][16][36][16]][cc-1]";
+  root.width = 290;
+  root.height = 844;
+  root.layoutMode = "NONE";
+  root.clipsContent = false;
+
+  const child = createMockNode("TEXT");
+  child.id = "child";
+  child.name = "Title[wh-lh][tt-te]";
+  child.parent = root;
+  child.layoutSizingHorizontal = "FIXED";
+  child.layoutSizingVertical = "FIXED";
+  child.textTruncation = "DISABLED";
+  root.children.push(child);
+
+  const result = postprocessMasterGoNodes([root]);
+
+  assert.equal(root.name, "容器");
+  assert.equal(root.layoutMode, "VERTICAL");
+  assert.equal(root.layoutWrap, "NO_WRAP");
+  assert.equal(root.primaryAxisAlignItems, "MIN");
+  assert.equal(root.counterAxisAlignItems, "MIN");
+  assert.equal(root.primaryAxisSizingMode, "FIXED");
+  assert.equal(root.counterAxisSizingMode, "FIXED");
+  assert.equal(root.paddingTop, 36);
+  assert.equal(root.paddingRight, 16);
+  assert.equal(root.paddingBottom, 36);
+  assert.equal(root.paddingLeft, 16);
+  assert.equal(root.itemSpacing, 24);
+  assert.equal(root.clipsContent, true);
+  assert.equal(child.name, "Title");
+  assert.equal(child.layoutSizingHorizontal, "FILL");
+  assert.equal(child.layoutSizingVertical, "HUG");
+  assert.equal(child.textTruncation, "ENDING");
+  assert.ok(result.changed > 0);
+});
+
+test("postprocessMasterGoNodes should sort children by visual position before auto layout", () => {
+  const root = createMockNode("FRAME");
+  root.id = "root";
+  root.name = "Stack[ay-vnssffffa[8][0][0][0][0][0]]";
+  root.layoutMode = "NONE";
+
+  const lower = createMockNode("FRAME");
+  lower.id = "lower";
+  lower.name = "Lower";
+  lower.y = 120;
+  const upper = createMockNode("FRAME");
+  upper.id = "upper";
+  upper.name = "Upper";
+  upper.y = 20;
+
+  root.children.push(lower, upper);
+  lower.parent = root;
+  upper.parent = root;
+
+  postprocessMasterGoNodes([root], { cleanNames: false });
+
+  assert.deepEqual(root.children.map((node) => node.id), ["upper", "lower"]);
+  assert.equal(root.layoutMode, "VERTICAL");
+});
+
+test("postprocessMasterGoNodes should lift full-size mask style without touching components", () => {
+  const frame = createMockNode("FRAME");
+  frame.id = "frame";
+  frame.name = "Card";
+  frame.width = 100;
+  frame.height = 80;
+  frame.fills = [];
+  frame.strokes = [];
+
+  const mask = createMockNode("RECTANGLE");
+  mask.id = "mask";
+  mask.x = 0;
+  mask.y = 0;
+  mask.width = 100;
+  mask.height = 80;
+  mask.fills = [{ type: "SOLID", color: { r: 1, g: 0, b: 0 } }];
+  mask.strokes = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }];
+  mask.cornerRadius = 8;
+  mask.remove = () => {
+    mask.removed = true;
+  };
+  frame.children.push(mask);
+  mask.parent = frame;
+
+  const component = createMockNode("INSTANCE");
+  component.id = "instance";
+  component.name = "Button";
+  component.width = 100;
+  component.height = 80;
+
+  const componentFrame = createMockNode("FRAME");
+  componentFrame.id = "component-frame";
+  componentFrame.width = 100;
+  componentFrame.height = 80;
+  componentFrame.children.push(component);
+  component.parent = componentFrame;
+
+  const result = postprocessMasterGoNodes([frame, componentFrame]);
+
+  assert.equal(frame.fills[0].color.r, 1);
+  assert.equal(frame.strokes.length, 1);
+  assert.equal(frame.cornerRadius, 8);
+  assert.equal(mask.removed, true);
+  assert.equal(component.removed, undefined);
+  assert.ok(result.changed >= 1);
+});
+
+test("postprocessMasterGoNodes should restore effects from name markers", () => {
+  const node = createMockNode("FRAME");
+  node.id = "effect-frame";
+  node.name = "Panel[ef-[ds][v][00000080][0][4][0][12][m]_[lb][v][8][n][e]]";
+  node.effects = [];
+
+  const result = postprocessMasterGoNodes([node], { cleanNames: false });
+
+  assert.equal(node.effects.length, 2);
+  assert.equal(node.effects[0].type, "DROP_SHADOW");
+  assert.equal(node.effects[0].visible, true);
+  assert.equal(node.effects[0].blendMode, "MULTIPLY");
+  assert.equal(node.effects[0].offset.y, 4);
+  assert.equal(node.effects[0].radius, 12);
+  assert.equal(Math.round(node.effects[0].color.a * 100) / 100, 0.5);
+  assert.equal(node.effects[1].type, "LAYER_BLUR");
+  assert.equal(node.effects[1].radius, 8);
+  assert.ok(result.changed >= 1);
 });
 
 test("exportFromDslPayload should transform MasterGo DSL format", () => {

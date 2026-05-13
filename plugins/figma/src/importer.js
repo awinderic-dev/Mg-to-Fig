@@ -1,5 +1,19 @@
 import { ERROR_CODES, createDiagnostic, validateDocument } from "../../../packages/schema/src/index.js";
 
+const FALLBACK_FONT = { family: "Inter", style: "Regular" };
+const SUPPORTED_IMPORT_NODE_TYPES = new Set([
+  "FRAME",
+  "GROUP",
+  "TEXT",
+  "RECTANGLE",
+  "IMAGE",
+  "VECTOR",
+  "COMPONENT",
+  "INSTANCE"
+]);
+const FIGMA_IMAGE_MAX_DIMENSION = 4096;
+const MASTERGO_IMAGE_BASE_URL = "https://image-resource.mastergo.com";
+
 function mapNodeType(type) {
   switch (type) {
     case "FRAME":
@@ -22,16 +36,133 @@ function mapNodeType(type) {
   }
 }
 
-export function resolveFont(font, ruleSet) {
-  if (!font?.fontFamily) return { fontName: { family: "Inter", style: "Regular" }, strategy: "systemFallback" };
+function fontKey(fontName) {
+  return `${fontName.family}:${fontName.style}`;
+}
+
+function normalizeAvailableFonts(availableFonts = []) {
+  const fonts = [];
+  for (const item of availableFonts) {
+    const fontName = item?.fontName ?? item;
+    if (fontName?.family && fontName?.style) {
+      fonts.push({ family: fontName.family, style: fontName.style });
+    }
+  }
+  return fonts;
+}
+
+function isFontAvailable(fontName, availableFonts) {
+  if (!availableFonts || availableFonts.length === 0) return true;
+  return availableFonts.some((candidate) => (
+    candidate.family === fontName.family && candidate.style === fontName.style
+  ));
+}
+
+function findFamilyFont(family, preferredStyle, availableFonts) {
+  if (!availableFonts || availableFonts.length === 0) return null;
+  return availableFonts.find((font) => font.family === family && font.style === preferredStyle)
+    ?? availableFonts.find((font) => font.family === family)
+    ?? null;
+}
+
+export function resolveFont(font, ruleSet, availableFonts = null) {
+  const fontList = availableFonts ? normalizeAvailableFonts(availableFonts) : availableFonts;
+  if (!font?.fontFamily) return { fontName: FALLBACK_FONT, strategy: "systemFallback" };
 
   const exact = ruleSet?.exact?.[`${font.fontFamily}:${font.fontStyle ?? "Regular"}`];
-  if (exact) return { fontName: exact, strategy: "exact" };
+  if (exact && isFontAvailable(exact, fontList)) return { fontName: exact, strategy: "exact" };
 
   const familyMatch = ruleSet?.family?.[font.fontFamily];
-  if (familyMatch) return { fontName: { family: familyMatch, style: font.fontStyle ?? "Regular" }, strategy: "family" };
+  if (familyMatch) {
+    const mapped = { family: familyMatch, style: font.fontStyle ?? "Regular" };
+    if (isFontAvailable(mapped, fontList)) return { fontName: mapped, strategy: "family" };
+  }
 
-  return { fontName: { family: "Inter", style: "Regular" }, strategy: "systemFallback" };
+  const sameFamily = findFamilyFont(font.fontFamily, font.fontStyle ?? "Regular", fontList);
+  if (sameFamily) return { fontName: sameFamily, strategy: "availableFamily" };
+
+  const fallback = isFontAvailable(FALLBACK_FONT, fontList)
+    ? FALLBACK_FONT
+    : fontList?.[0] ?? FALLBACK_FONT;
+
+  return { fontName: fallback, strategy: "systemFallback" };
+}
+
+export async function collectAvailableFonts() {
+  const figmaApi = globalThis.figma;
+  if (typeof figmaApi?.listAvailableFontsAsync !== "function") return [];
+  return normalizeAvailableFonts(await figmaApi.listAvailableFontsAsync());
+}
+
+export function buildFontPreflightReport(document, fontRuleSet = {}, availableFonts = []) {
+  const fontList = normalizeAvailableFonts(availableFonts);
+  const requested = new Map();
+  for (const node of document.nodes ?? []) {
+    if (node.type !== "TEXT" || !node.text) continue;
+    const requestKey = `${node.text.fontFamily ?? "Unknown"}:${node.text.fontStyle ?? "Regular"}`;
+    const resolved = resolveFont(node.text, fontRuleSet, fontList);
+    const existing = requested.get(requestKey) ?? {
+      requested: {
+        family: node.text.fontFamily ?? "Unknown",
+        style: node.text.fontStyle ?? "Regular"
+      },
+      resolved: resolved.fontName,
+      strategy: resolved.strategy,
+      nodeIds: []
+    };
+    existing.nodeIds.push(node.id);
+    requested.set(requestKey, existing);
+  }
+
+  return {
+    availableCount: fontList.length,
+    requestedFonts: Array.from(requested.values()),
+    fallbackCount: Array.from(requested.values()).filter((item) => item.strategy !== "exact").length
+  };
+}
+
+function collectImageRefsFromNode(node) {
+  const refs = [];
+  if (node.imageRef) refs.push({ nodeId: node.id, assetId: node.imageRef, field: "imageRef" });
+  for (const fill of node.style?.fills ?? []) {
+    if (fill?.type === "IMAGE_REF" && fill.assetId) {
+      refs.push({ nodeId: node.id, assetId: fill.assetId, field: "style.fills" });
+    }
+  }
+  return refs;
+}
+
+export function buildImportPreflightReport(document) {
+  const assets = document.assets ?? [];
+  const assetMap = new Map(assets.map((asset) => [asset.id, asset]));
+  const imageRefs = (document.nodes ?? []).flatMap((node) => collectImageRefsFromNode(node));
+  const unsupportedNodeTypes = [];
+
+  for (const node of document.nodes ?? []) {
+    if (!SUPPORTED_IMPORT_NODE_TYPES.has(node.type)) {
+      unsupportedNodeTypes.push({ nodeId: node.id, type: node.type });
+    }
+  }
+
+  return {
+    nodeCount: document.nodes?.length ?? 0,
+    assetCount: assets.length,
+    imageAssetCount: assets.filter((asset) => asset.type === "image").length,
+    imageRefCount: imageRefs.length,
+    missingAssetRefs: imageRefs.filter((ref) => !assetMap.has(ref.assetId)),
+    oversizedImageAssets: assets
+      .filter((asset) => asset.type === "image")
+      .filter((asset) => (
+        Number(asset.width ?? 0) > FIGMA_IMAGE_MAX_DIMENSION
+        || Number(asset.height ?? 0) > FIGMA_IMAGE_MAX_DIMENSION
+      ))
+      .map((asset) => ({
+        assetId: asset.id,
+        width: asset.width ?? null,
+        height: asset.height ?? null
+      })),
+    unsupportedNodeTypes
+  };
 }
 
 function nodeDepth(nodeById, nodeId, memo = new Map()) {
@@ -72,6 +203,88 @@ function applyGeometry(target, geometry) {
   if (typeof geometry.rotation === "number") {
     target.rotation = geometry.rotation;
   }
+}
+
+function decodeBase64(base64) {
+  const normalized = String(base64 ?? "").replace(/^data:[^;]+;base64,/, "");
+  if (!normalized) return null;
+  if (typeof Uint8Array.fromBase64 === "function") {
+    return Uint8Array.fromBase64(normalized);
+  }
+  if (typeof atob === "function") {
+    const binary = atob(normalized);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+  }
+  if (typeof Buffer !== "undefined") {
+    return Uint8Array.from(Buffer.from(normalized, "base64"));
+  }
+  return null;
+}
+
+function normalizeImageUri(uri) {
+  if (!uri || typeof uri !== "string") return null;
+  if (/^https?:\/\//.test(uri)) return uri;
+  return `${MASTERGO_IMAGE_BASE_URL}/${uri.replace(/^\/+/, "")}`;
+}
+
+async function createImageFromAsset(asset, diagnostics, nodeId, imageCache) {
+  if (!asset) {
+    diagnostics.push(
+      createDiagnostic({
+        level: "warn",
+        code: ERROR_CODES.ASSET_MISSING,
+        nodeId,
+        message: "Image asset reference is missing from assets[].",
+        fallbackApplied: true
+      })
+    );
+    return null;
+  }
+  if (imageCache.has(asset.id)) return imageCache.get(asset.id);
+
+  try {
+    let image = null;
+    if (asset.transport === "inline" && asset.data && typeof figma.createImage === "function") {
+      const bytes = decodeBase64(asset.data);
+      if (bytes) image = figma.createImage(bytes);
+    }
+    if (!image && asset.uri && typeof figma.createImageAsync === "function") {
+      image = await figma.createImageAsync(asset.uri);
+    }
+
+    if (image) {
+      imageCache.set(asset.id, image);
+      return image;
+    }
+  } catch (error) {
+    diagnostics.push(
+      createDiagnostic({
+        level: "warn",
+        code: ERROR_CODES.ASSET_MISSING,
+        nodeId,
+        assetId: asset.id,
+        message: `Image asset load failed: ${String(error?.message ?? error)}`,
+        fallbackApplied: true
+      })
+    );
+    return null;
+  }
+
+  diagnostics.push(
+    createDiagnostic({
+      level: "warn",
+      code: ERROR_CODES.ASSET_MISSING,
+      nodeId,
+      assetId: asset.id,
+      message: "Image asset has no supported transport for Figma import.",
+      fallbackApplied: true
+    })
+  );
+  return null;
 }
 
 function applyLayout(target, node) {
@@ -135,10 +348,55 @@ function buildSvgVectorNode(node, fillColor) {
   return figma.createNodeFromSvg(svg);
 }
 
-async function resolveFills(styleFills, diagnostics, nodeId) {
+async function resolveFills(styleFills, diagnostics, nodeId, assetMap, imageCache) {
   if (!Array.isArray(styleFills)) return [];
   const result = [];
   for (const fill of styleFills) {
+    if (fill?.type === "IMAGE_REF" && typeof fill.assetId === "string") {
+      const image = await createImageFromAsset(assetMap.get(fill.assetId), diagnostics, nodeId, imageCache);
+      if (image?.hash) {
+        result.push({
+          type: "IMAGE",
+          imageHash: image.hash,
+          scaleMode: fill.scaleMode ?? "FILL",
+          opacity: typeof fill.opacity === "number" ? fill.opacity : 1
+        });
+      } else {
+        result.push({
+          type: "SOLID",
+          color: { r: 0.85, g: 0.85, b: 0.85 },
+          opacity: 1
+        });
+      }
+      continue;
+    }
+    if (fill?.type === "IMAGE" && typeof fill.imageRef === "string") {
+      try {
+        const image = await figma.createImageAsync(normalizeImageUri(fill.imageRef));
+        result.push({
+          type: "IMAGE",
+          imageHash: image.hash,
+          scaleMode: fill.scaleMode ?? "FILL",
+          opacity: typeof fill.alpha === "number" ? fill.alpha : 1
+        });
+      } catch (error) {
+        diagnostics.push(
+          createDiagnostic({
+            level: "warn",
+            code: ERROR_CODES.ASSET_MISSING,
+            nodeId,
+            message: `MasterGo imageRef load failed, fallback to solid: ${String(error?.message ?? error)}`,
+            fallbackApplied: true
+          })
+        );
+        result.push({
+          type: "SOLID",
+          color: { r: 0.85, g: 0.85, b: 0.85 },
+          opacity: 1
+        });
+      }
+      continue;
+    }
     if (fill?.type === "IMAGE_URL" && typeof fill.url === "string") {
       try {
         const image = await figma.createImageAsync(fill.url);
@@ -170,14 +428,26 @@ async function resolveFills(styleFills, diagnostics, nodeId) {
   return result;
 }
 
-async function applyStyle(target, style, diagnostics, nodeId) {
-  if (style.fills) target.fills = await resolveFills(style.fills, diagnostics, nodeId);
+async function applyStyle(target, style, diagnostics, nodeId, assetMap, imageCache) {
+  if (style.fills) target.fills = await resolveFills(style.fills, diagnostics, nodeId, assetMap, imageCache);
   if (style.strokes) target.strokes = style.strokes;
   if (style.effects) target.effects = style.effects;
   if (typeof style.opacity === "number") target.opacity = style.opacity;
   if (typeof style.cornerRadius === "number" && "cornerRadius" in target) target.cornerRadius = style.cornerRadius;
   if (typeof style.strokeWeight === "number" && "strokeWeight" in target) target.strokeWeight = style.strokeWeight;
   if (style.strokeAlign && "strokeAlign" in target) target.strokeAlign = style.strokeAlign;
+}
+
+async function applyImageRef(target, node, assetMap, imageCache, diagnostics) {
+  if (!node.imageRef || !("fills" in target)) return;
+  const image = await createImageFromAsset(assetMap.get(node.imageRef), diagnostics, node.id, imageCache);
+  if (image?.hash) {
+    target.fills = [{
+      type: "IMAGE",
+      imageHash: image.hash,
+      scaleMode: "FILL"
+    }];
+  }
 }
 
 function applyVectorData(target, node, diagnostics) {
@@ -205,11 +475,37 @@ function applyVectorData(target, node, diagnostics) {
   return true;
 }
 
-async function applyText(target, node, fontRuleSet, diagnostics) {
+async function loadFont(fontName, fontLoadCache) {
+  const key = fontKey(fontName);
+  if (!fontLoadCache.has(key)) {
+    fontLoadCache.set(key, figma.loadFontAsync(fontName));
+  }
+  await fontLoadCache.get(key);
+}
+
+async function applyText(target, node, fontRuleSet, diagnostics, availableFonts, fontLoadCache) {
   if (node.type !== "TEXT" || !node.text) return;
 
-  const fontResolve = resolveFont(node.text, fontRuleSet);
-  await figma.loadFontAsync(fontResolve.fontName);
+  let fontResolve = resolveFont(node.text, fontRuleSet, availableFonts);
+  try {
+    await loadFont(fontResolve.fontName, fontLoadCache);
+  } catch (error) {
+    diagnostics.push(
+      createDiagnostic({
+        level: "warn",
+        code: ERROR_CODES.FONT_FALLBACK,
+        nodeId: node.id,
+        message: `Font load failed, fallback applied: ${String(error?.message ?? error)}`,
+        fallbackApplied: true,
+        details: {
+          requestedFont: `${node.text.fontFamily}:${node.text.fontStyle}`,
+          failedFont: `${fontResolve.fontName.family}:${fontResolve.fontName.style}`
+        }
+      })
+    );
+    fontResolve = { fontName: FALLBACK_FONT, strategy: "systemFallback" };
+    await loadFont(fontResolve.fontName, fontLoadCache);
+  }
   target.fontName = fontResolve.fontName;
   target.fontSize = node.text.fontSize;
   target.fontName = { family: fontResolve.fontName.family, style: fontResolve.fontName.style };
@@ -380,10 +676,31 @@ export function buildParameterDiffReport(sourceNodes, createdBySourceId) {
   return report;
 }
 
+export function createImportSession() {
+  return {
+    createdById: new Map(),
+    imageCache: new Map(),
+    fontLoadCache: new Map()
+  };
+}
+
+function hydrateCreatedNodesFromPage(createdById) {
+  const figmaApi = globalThis.figma;
+  if (typeof figmaApi?.currentPage?.findAll !== "function") return;
+  const importedNodes = figmaApi.currentPage.findAll((node) => (
+    typeof node.getPluginData === "function" && node.getPluginData("mgSourceNodeId")
+  ));
+  for (const node of importedNodes) {
+    createdById.set(node.getPluginData("mgSourceNodeId"), node);
+  }
+}
+
 export async function importToFigma({
   document,
   fontRuleSet = {},
-  batch = null
+  batch = null,
+  session = null,
+  availableFonts = null
 }) {
   const validation = validateDocument(document);
   const diagnostics = [...(document.diagnostics ?? [])];
@@ -403,10 +720,16 @@ export async function importToFigma({
     };
   }
 
-  const createdById = new Map();
+  const activeSession = session ?? createImportSession();
+  const createdById = activeSession.createdById;
+  hydrateCreatedNodesFromPage(createdById);
   const sortedNodes = sortNodesForImport(document.nodes);
   const batchedNodes = pickBatch(sortedNodes, batch);
   const tokenMap = new Map((document.tokens ?? []).map((token) => [token.tokenId, token]));
+  const assetMap = new Map((document.assets ?? []).map((asset) => [asset.id, asset]));
+  const preflight = buildImportPreflightReport(document);
+  const resolvedAvailableFonts = normalizeAvailableFonts(availableFonts ?? await collectAvailableFonts());
+  const fontPreflight = buildFontPreflightReport(document, fontRuleSet, resolvedAvailableFonts);
   const createdNodes = [];
 
   for (const node of batchedNodes) {
@@ -427,7 +750,8 @@ export async function importToFigma({
     raw.name = node.name;
     applyGeometry(raw, node.geometry);
     applyLayout(raw, node);
-    await applyStyle(raw, node.style, diagnostics, node.id);
+    await applyStyle(raw, node.style, diagnostics, node.id, assetMap, activeSession.imageCache);
+    await applyImageRef(raw, node, assetMap, activeSession.imageCache, diagnostics);
     const vectorApplied = applyVectorData(raw, node, diagnostics);
     if (!vectorApplied && node.type === "VECTOR") {
       const svgNode = buildSvgVectorNode(node, resolveSolidFillColor(node.style?.fills?.[0]));
@@ -438,14 +762,15 @@ export async function importToFigma({
         applyGeometry(raw, node.geometry);
       }
     }
-    await applyText(raw, node, fontRuleSet, diagnostics);
+    await applyText(raw, node, fontRuleSet, diagnostics, resolvedAvailableFonts, activeSession.fontLoadCache);
 
     let target = applyComponentSemantics(raw, node, createdById, diagnostics);
     if (target !== raw) {
       raw.remove();
       applyGeometry(target, node.geometry);
       applyLayout(target, node);
-      await applyStyle(target, node.style, diagnostics, node.id);
+      await applyStyle(target, node.style, diagnostics, node.id, assetMap, activeSession.imageCache);
+      await applyImageRef(target, node, assetMap, activeSession.imageCache, diagnostics);
       applyVectorData(target, node, diagnostics);
     }
 
@@ -469,6 +794,9 @@ export async function importToFigma({
     createdNodes,
     diagnostics,
     diffReport,
+    preflight,
+    fontPreflight,
+    session: activeSession,
     batch: {
       total: sortedNodes.length,
       imported: batchedNodes.length,

@@ -32,6 +32,10 @@
 - 约束推断：
   - `flexGrow>0` -> `constraints.grow=true`
   - `flexShrink=0` -> `constraints.preserveSize=true`
+- Figma MCP 验证结论（2026-05-11）：
+  - `layoutSizingHorizontal/Vertical = FILL` 必须在节点被挂入 Auto Layout 父级之后设置；挂入前会报错。
+  - `resize()` 会把 `layoutSizingHorizontal/Vertical` 重置为 `FIXED`，因此导入/后处理顺序必须是：先 `resize`，再挂父级，最后设置 `wh-*` sizing。
+  - 单个有效流式子节点的 `SPACE_BETWEEN` 会造成视觉偏移，后处理统一降为 `MIN`。
 
 ## 5. 样式映射
 
@@ -40,7 +44,7 @@
 - `#RRGGBB` -> `SOLID`
 - `rgba(...)` -> `SOLID + opacity`
 - `linear-gradient(...)` -> `GRADIENT_LINEAR`
-- 图片 URL -> `IMAGE`（导入阶段拉取）
+- 图片 URL -> `IMAGE_REF` + `assets[]` 记录，导入阶段优先按资产解析
 
 ### 5.2 Stroke
 
@@ -54,6 +58,12 @@
 
 - 若值已是 Figma effect 结构，直接透传
 - 若是影子语义字段（`shadowColor` 等），转为 `DROP_SHADOW`
+- 旧命名协议里的 `[ef-...]` 由 Figma 后处理器恢复：
+  - `[ds]` -> `DROP_SHADOW`
+  - `[is]` -> `INNER_SHADOW`
+  - `[lb]` -> `LAYER_BLUR`
+  - `[bb]` -> `BACKGROUND_BLUR`
+  - `LIQUID_GLASS/MOTION_BLUR` 当前仅诊断记录，暂不强行套用，避免 Figma 运行时兼容问题。
 
 ### 5.4 Radius / Opacity
 
@@ -76,6 +86,7 @@
 - 导入时优先查找已创建主组件：
   - 命中：`createInstance()`
   - 未命中：降级为 `FRAME`，并记 `E_COMPONENT_BIND_FAIL`
+- Figma MCP 验证结论（2026-05-11）：`INSTANCE` 可安全应用 `effects` 等外观属性。后处理器不得删除或重建实例，只能补充属性。
 
 ## 8. 路径矢量
 
@@ -115,3 +126,26 @@
 - 不允许在插件主链路依赖“会话态 fetch”去拉图；应以 `assets[]` 为主数据源。
 - 图片、图标失败不能中断整页导入；必须节点级降级并继续。
 - 所有降级都要进入 `diagnostics[]`，支持批量复跑与问题定位。
+- 对 SK 导入后的 Figma 后处理，原则是“补属性，不重建资源节点”：
+  - MasterGo MCP 的真实 DSL 验证显示 `PATH.data`、图片 URL、`componentId/componentInfo` 在设计数据里存在。
+  - 因此后处理器优先修复 Auto Layout、尺寸、遮罩、效果和文本，不主动替换 PATH、IMAGE、INSTANCE。
+  - 全尺寸首层矩形/椭圆遮罩可将 fill/stroke/effect/radius 提升到父级；其他节点不做删除式修复。
+
+### 10.4 批量导入会话
+
+- 同一次插件会话内维护 `mgSourceNodeId -> Figma Node` 映射。
+- 分片导入时，后续批次必须复用前序批次父节点，避免子节点被错误挂到当前页。
+- 每个导入节点写入 `pluginData.mgSourceNodeId`，用于会话恢复与问题定位。
+
+### 10.5 字体预检
+
+- 导入前读取 Figma 当前可用字体列表。
+- 字体匹配顺序：用户规则精确匹配 -> 用户 family 映射 -> 当前文件可用同 family 字体 -> Inter/首个可用字体。
+- 每次导入输出 `fontPreflight`，记录请求字体、解析字体、命中策略和回退数量。
+
+### 10.6 风险预检
+
+- 每次导入输出 `preflight`，统计节点数、资产数、图片引用数。
+- 预检会列出缺失的 `IMAGE_REF` 资产引用，导入阶段仍会降级为占位色并继续。
+- 预检会标记宽或高超过 4096 的图片资产，便于导出侧提前分包或降采样。
+- 预检会列出当前导入器不支持的节点类型。

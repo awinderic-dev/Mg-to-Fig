@@ -1,0 +1,42 @@
+{
+  "name": "Mg to Fig Tools Enhanced",
+  "id": "mg-to-fig-tools-enhanced",
+  "api": "1.0.0",
+  "main": "code.js",
+  "capabilities": [],
+  "enableProposedApi": false,
+  "documentAccess": "dynamic-page",
+  "editorType": [
+    "figma"
+  ],
+  "networkAccess": {
+    "allowedDomains": [
+      "none"
+    ]
+  },
+  "menu": [
+    {
+      "name": "诊断当前选区",
+      "command": "mg2fig_diagnose"
+    },
+    {
+      "separator": true
+    },
+    {
+      "name": "Still Off On Time（原修复）",
+      "command": "off_all"
+    },
+    {
+      "name": "Related Autolayout（原逻辑）",
+      "command": "off_related_Autolayout"
+    },
+    {
+      "name": "Trans Mask To Parent（原逻辑）",
+      "command": "off_transMask"
+    },
+    {
+      "name": "Pure Name（原逻辑）",
+      "command": "off_clean_pureName"
+    }
+  ]
+}

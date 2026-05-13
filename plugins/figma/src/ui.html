@@ -29,6 +29,7 @@
   <body>
     <textarea id="json" placeholder="粘贴导出的 document JSON"></textarea>
     <button id="import">开始导入</button>
+    <button id="reset">重置导入会话</button>
     <button id="close">关闭</button>
     <pre id="status">等待导入…</pre>
     <script>
@@ -62,14 +63,23 @@
         parent.postMessage({ pluginMessage: { type: "close" } }, "*");
       };
 
+      document.getElementById("reset").onclick = () => {
+        parent.postMessage({ pluginMessage: { type: "import:reset-session" } }, "*");
+      };
+
       window.onmessage = (event) => {
         const message = event.data.pluginMessage;
         if (!message) return;
         if (message.type === "import:result") {
-          status.textContent = `导入完成: created=${message.payload.createdCount}, diagnostics=${message.payload.diagnostics.length}`;
+          const fontFallbacks = message.payload.fontPreflight?.fallbackCount ?? 0;
+          const missingAssets = message.payload.preflight?.missingAssetRefs?.length ?? 0;
+          status.textContent = `导入完成: created=${message.payload.createdCount}, diagnostics=${message.payload.diagnostics.length}, fontFallbacks=${fontFallbacks}, missingAssets=${missingAssets}`;
         }
         if (message.type === "import:error") {
           status.textContent = `导入失败: ${message.payload.message}`;
+        }
+        if (message.type === "import:session-reset") {
+          status.textContent = "导入会话已重置";
         }
       };
     </script>

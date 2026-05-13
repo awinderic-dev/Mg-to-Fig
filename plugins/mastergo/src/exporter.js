@@ -18,6 +18,28 @@ const SUPPORTED_NODE_TYPES = new Set([
   "INSTANCE"
 ]);
 
+const NON_EMITTED_NODE_TYPES = new Set(["PAGE"]);
+const VECTOR_FALLBACK_TYPES = new Set(["PEN", "POLYGON"]);
+const MASTERGO_IMAGE_BASE_URL = "https://image-resource.mastergo.com";
+
+function normalizeNodeType(node) {
+  if (NON_EMITTED_NODE_TYPES.has(node.type)) return null;
+  if (VECTOR_FALLBACK_TYPES.has(node.type)) {
+    if (Array.isArray(node.vectorPaths) && node.vectorPaths.length > 0) return "VECTOR";
+    return "IMAGE";
+  }
+  return node.type;
+}
+
+function normalizeDocumentMeta(meta) {
+  return {
+    ...meta,
+    sourceFileId: String(meta.sourceFileId ?? "unknown-file"),
+    sourcePageId: String(meta.sourcePageId ?? "unknown-page"),
+    sourcePageName: String(meta.sourcePageName ?? "unknown-page")
+  };
+}
+
 function normalizeGeometry(node) {
   return {
     x: Number(node.x ?? 0),
@@ -58,6 +80,59 @@ function normalizeStyle(node) {
   };
 }
 
+function normalizeAssetId(raw, fallback) {
+  return String(raw ?? fallback).replace(/[^a-zA-Z0-9:_-]/g, "_");
+}
+
+function normalizeImageUri(uri) {
+  if (!uri || typeof uri !== "string") return null;
+  if (/^https?:\/\//.test(uri)) return uri;
+  return `${MASTERGO_IMAGE_BASE_URL}/${uri.replace(/^\/+/, "")}`;
+}
+
+function normalizeImageAsset(image, { nodeId, fallbackId, assetInlineLimitBytes }, diagnostics) {
+  if (!image || typeof image !== "object") return null;
+  if (image.error) return null;
+
+  const data = image.data ?? image.base64 ?? null;
+  const uri = normalizeImageUri(image.uri ?? image.url ?? image.imageRef ?? null);
+  const sizeBytes = Number(image.sizeBytes ?? (typeof data === "string" ? data.length : 0));
+  const canInline = typeof data === "string" && data.length > 0 && sizeBytes <= assetInlineLimitBytes;
+  const asset = {
+    id: normalizeAssetId(image.id ?? image.assetId, fallbackId),
+    type: "image",
+    mimeType: image.mimeType ?? "image/png",
+    sizeBytes,
+    transport: canInline ? "inline" : "external",
+    uri: canInline ? null : uri,
+    data: canInline ? data : null,
+    checksum: image.checksum ?? null,
+    width: Number.isFinite(Number(image.width)) ? Number(image.width) : null,
+    height: Number.isFinite(Number(image.height)) ? Number(image.height) : null
+  };
+
+  if (asset.transport === "external" && !asset.uri) {
+    diagnostics.push(
+      createDiagnostic({
+        level: "error",
+        code: ERROR_CODES.ASSET_MISSING,
+        nodeId,
+        assetId: asset.id,
+        message: "Image asset has no inline data or URI.",
+        fallbackApplied: false
+      })
+    );
+  }
+
+  return asset;
+}
+
+function addAsset(asset, assets, assetIds) {
+  if (!asset || assetIds.has(asset.id)) return;
+  assets.push(asset);
+  assetIds.add(asset.id);
+}
+
 function normalizeText(node) {
   if (node.type !== "TEXT") return null;
   return {
@@ -87,38 +162,61 @@ function normalizeTokenRefs(node) {
   return Array.isArray(node.tokenRefs) ? node.tokenRefs : [];
 }
 
-function collectAsset(node, options, assets, diagnostics) {
-  if (node.type !== "IMAGE" || !node.image) return null;
+function normalizeVectorPaths(node) {
+  return Array.isArray(node.vectorPaths)
+    ? node.vectorPaths.filter((segment) => typeof segment?.data === "string" && segment.data.length > 0)
+    : [];
+}
 
-  const image = node.image;
-  const sizeBytes = Number(image.sizeBytes ?? 0);
-  const useInline = sizeBytes <= options.assetInlineLimitBytes;
-  const asset = {
-    id: image.id ?? `${node.id}-image`,
-    type: "image",
-    mimeType: image.mimeType ?? "image/png",
-    sizeBytes,
-    transport: useInline ? "inline" : "external",
-    uri: useInline ? null : image.uri ?? null,
-    data: useInline ? image.base64 ?? null : null,
-    checksum: image.checksum ?? null
-  };
+function collectNodeAsset(node, options, assets, assetIds, diagnostics) {
+  if (!node.image || node.image.error) return null;
 
-  if (!useInline && !asset.uri) {
-    diagnostics.push(
-      createDiagnostic({
-        level: "error",
-        code: ERROR_CODES.ASSET_MISSING,
-        nodeId: node.id,
-        assetId: asset.id,
-        message: "Large image asset has no URI.",
-        fallbackApplied: false
-      })
-    );
-  }
+  const asset = normalizeImageAsset(node.image, {
+    nodeId: node.id,
+    fallbackId: `${node.id}-image`,
+    assetInlineLimitBytes: options.assetInlineLimitBytes
+  }, diagnostics);
 
-  assets.push(asset);
-  return asset.id;
+  addAsset(asset, assets, assetIds);
+  return asset?.id ?? null;
+}
+
+function collectFillAssets(node, fills, options, assets, assetIds, diagnostics) {
+  return fills.map((fill, index) => {
+    if (!fill || typeof fill !== "object") return fill;
+
+    if (fill.type === "IMAGE_REF" && typeof fill.assetId === "string") {
+      return fill;
+    }
+
+    if (fill.type !== "IMAGE_URL" && fill.type !== "IMAGE") {
+      return fill;
+    }
+
+    const fallbackId = `${node.id}-fill-${index}`;
+    const asset = normalizeImageAsset({
+      id: fill.assetId,
+      url: fill.url,
+      imageRef: fill.imageRef,
+      mimeType: fill.mimeType,
+      sizeBytes: fill.sizeBytes,
+      checksum: fill.checksum,
+      width: fill.width,
+      height: fill.height
+    }, {
+      nodeId: node.id,
+      fallbackId,
+      assetInlineLimitBytes: options.assetInlineLimitBytes
+    }, diagnostics);
+
+    addAsset(asset, assets, assetIds);
+    return {
+      type: "IMAGE_REF",
+      assetId: asset?.id ?? normalizeAssetId(fill.assetId, fallbackId),
+      scaleMode: fill.scaleMode ?? "FILL",
+      opacity: typeof fill.opacity === "number" ? fill.opacity : 1
+    };
+  });
 }
 
 function collectTokenRegistry(node, tokenRegistry) {
@@ -144,10 +242,12 @@ function collectTokenRegistry(node, tokenRegistry) {
 }
 
 function flattenNodeTree(node, parentId, output) {
-  output.push({ node, parentId });
+  const normalizedType = normalizeNodeType(node);
+  const emit = normalizedType !== null && SUPPORTED_NODE_TYPES.has(normalizedType);
+  output.push({ node, parentId, normalizedType, emit });
   const children = Array.isArray(node.children) ? node.children : [];
   for (const child of children) {
-    flattenNodeTree(child, node.id, output);
+    flattenNodeTree(child, emit ? node.id : parentId, output);
   }
 }
 
@@ -163,40 +263,88 @@ export function exportFromMasterGo({
   }
 
   const assets = [];
+  const assetIds = new Set();
   const nodes = [];
   const diagnostics = [];
   const tokenRegistry = new Map();
 
-  for (const { node, parentId } of flattened) {
-    if (!SUPPORTED_NODE_TYPES.has(node.type)) {
+  const emittedIds = new Set(flattened.filter((entry) => entry.emit).map((entry) => entry.node.id));
+
+  for (const { node, parentId, normalizedType, emit } of flattened) {
+    if (!emit) {
+      if (!NON_EMITTED_NODE_TYPES.has(node.type)) {
+        diagnostics.push(
+          createDiagnostic({
+            level: "warn",
+            code: ERROR_CODES.NODE_UNSUPPORTED,
+            nodeId: node.id ?? null,
+            message: `Unsupported node type: ${node.type ?? "UNKNOWN"}.`,
+            fallbackApplied: true
+          })
+        );
+      }
+      continue;
+    }
+
+    const vectorPaths = normalizeVectorPaths(node);
+
+    if (normalizedType === "VECTOR" && vectorPaths.length === 0) {
       diagnostics.push(
         createDiagnostic({
           level: "warn",
           code: ERROR_CODES.NODE_UNSUPPORTED,
           nodeId: node.id ?? null,
-          message: `Unsupported node type: ${node.type ?? "UNKNOWN"}.`,
+          message: `Vector node ${node.type ?? "UNKNOWN"} has no path data; it may import as an empty vector.`,
           fallbackApplied: true
         })
       );
-      continue;
     }
 
-    const imageRef = collectAsset(node, { assetInlineLimitBytes }, assets, diagnostics);
+    if (normalizedType === "IMAGE" && VECTOR_FALLBACK_TYPES.has(node.type) && (!node.image || node.image.error)) {
+      diagnostics.push(
+        createDiagnostic({
+          level: "error",
+          code: ERROR_CODES.ASSET_MISSING,
+          nodeId: node.id ?? null,
+          message: `Vector node ${node.type ?? "UNKNOWN"} has no path data and raster fallback export failed.`,
+          fallbackApplied: false,
+          details: {
+            exportError: node.image?.error ?? "No raster fallback payload."
+          }
+        })
+      );
+    }
+
+    if (node.type !== normalizedType) {
+      diagnostics.push(
+        createDiagnostic({
+          level: vectorPaths.length > 0 || normalizedType === "IMAGE" ? "info" : "warn",
+          code: ERROR_CODES.NODE_UNSUPPORTED,
+          nodeId: node.id ?? null,
+          message: `Node type ${node.type ?? "UNKNOWN"} downgraded to ${normalizedType}.`,
+          fallbackApplied: true
+        })
+      );
+    }
+
+    const style = normalizeStyle(node);
+    const imageRef = collectNodeAsset(node, { assetInlineLimitBytes }, assets, assetIds, diagnostics);
+    style.fills = collectFillAssets(node, style.fills, { assetInlineLimitBytes }, assets, assetIds, diagnostics);
     collectTokenRegistry(node, tokenRegistry);
 
     nodes.push({
       id: node.id,
-      type: node.type,
+      type: normalizedType,
       name: node.name ?? node.id,
       visible: node.visible !== false,
       locked: node.locked === true,
       parentId,
-      children: (node.children ?? []).map((child) => child.id),
+      children: (node.children ?? []).filter((child) => emittedIds.has(child.id)).map((child) => child.id),
       geometry: normalizeGeometry(node),
       layout: normalizeLayout(node),
-      style: normalizeStyle(node),
+      style,
       text: normalizeText(node),
-      vectorPaths: Array.isArray(node.vectorPaths) ? node.vectorPaths : [],
+      vectorPaths,
       imageRef,
       componentRef: normalizeComponentRef(node),
       tokenRefs: normalizeTokenRefs(node)
@@ -207,7 +355,7 @@ export function exportFromMasterGo({
     schemaVersion: SCHEMA_VERSION,
     documentMeta: createEmptyDocumentMeta({
       exportMode,
-      ...documentMeta
+      ...normalizeDocumentMeta(documentMeta)
     }),
     nodes,
     assets,
