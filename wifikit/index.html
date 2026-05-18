@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WiFiKit 设备自检</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="stage">
+      <section class="phone" aria-label="WiFiKit 设备自检">
+        <header class="statusbar" aria-label="手机状态栏">
+          <span>12:00</span>
+          <div class="system-icons" aria-hidden="true">
+            <span class="signal"></span>
+            <span class="wifi"></span>
+            <span class="battery"><i></i></span>
+          </div>
+        </header>
+
+        <nav class="topbar" aria-label="页面导航">
+          <button class="back-btn" type="button" aria-label="返回">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M15.5 5 8.5 12l7 7" />
+            </svg>
+          </button>
+          <h1>Point-to-point upgrade</h1>
+        </nav>
+
+        <section class="hero-card" aria-label="网络自检插图">
+          <div class="cloud cloud-one"></div>
+          <div class="cloud cloud-two"></div>
+          <div class="wifi-hero" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <div class="device-card">
+            <span></span>
+            <span></span>
+            <strong></strong>
+          </div>
+          <div class="tool-mark">
+            <i></i>
+          </div>
+        </section>
+
+        <section class="test-panel" aria-label="检测结果">
+          <div class="panel-title">
+            <h2>To be tested</h2>
+            <span class="mini-spinner" aria-label="检测中"></span>
+          </div>
+
+          <div class="result-list">
+            <article class="result-row">
+              <p>Online status:</p>
+              <strong>Normal</strong>
+              <span class="status success" aria-label="正常">
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="m4 8 2.3 2.3L12 5.2" />
+                </svg>
+              </span>
+            </article>
+
+            <article class="result-row">
+              <p>Positioning status:</p>
+              <strong class="danger">Abnormal</strong>
+              <span class="status fail" aria-label="异常">
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M5 5l6 6M11 5l-6 6" />
+                </svg>
+              </span>
+            </article>
+
+            <article class="result-row">
+              <p>Storage card status:</p>
+              <strong>--</strong>
+              <span class="status loading" aria-label="检测中"></span>
+            </article>
+          </div>
+        </section>
+
+        <button class="primary-action" type="button">Self-test now</button>
+
+        <footer class="home-indicator" aria-hidden="true">
+          <span></span>
+        </footer>
+      </section>
+    </main>
+  </body>
+</html>

@@ -270,8 +270,8 @@
       </section>
 
       <section class="tools">
-        <button class="secondary" id="copy" disabled>复制</button>
-        <button class="secondary" id="download" disabled>下载</button>
+        <button class="secondary" id="copy" disabled>复制结构 JSON</button>
+        <button class="secondary" id="download" disabled>下载 .mgfig</button>
         <button class="secondary" id="diagnose">诊断</button>
       </section>
 
@@ -355,6 +355,193 @@
         URL.revokeObjectURL(url);
       }
 
+      function downloadBlob(filename, blob) {
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = filename;
+        anchor.click();
+        URL.revokeObjectURL(url);
+      }
+
+      function base64ToBytes(base64) {
+        const normalized = String(base64 ?? "").replace(/^data:[^;]+;base64,/, "");
+        if (!normalized) return new Uint8Array();
+        const binary = atob(normalized);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) {
+          bytes[index] = binary.charCodeAt(index);
+        }
+        return bytes;
+      }
+
+      function makeCrcTable() {
+        const table = new Uint32Array(256);
+        for (let index = 0; index < 256; index += 1) {
+          let value = index;
+          for (let bit = 0; bit < 8; bit += 1) {
+            value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+          }
+          table[index] = value >>> 0;
+        }
+        return table;
+      }
+
+      const crcTable = makeCrcTable();
+      const encoder = new TextEncoder();
+
+      function crc32(bytes) {
+        let crc = 0xffffffff;
+        for (const byte of bytes) {
+          crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+        }
+        return (crc ^ 0xffffffff) >>> 0;
+      }
+
+      function writeUint16(target, offset, value) {
+        target[offset] = value & 0xff;
+        target[offset + 1] = (value >>> 8) & 0xff;
+      }
+
+      function writeUint32(target, offset, value) {
+        target[offset] = value & 0xff;
+        target[offset + 1] = (value >>> 8) & 0xff;
+        target[offset + 2] = (value >>> 16) & 0xff;
+        target[offset + 3] = (value >>> 24) & 0xff;
+      }
+
+      function createStoredZip(fileEntries) {
+        const localParts = [];
+        const centralParts = [];
+        let offset = 0;
+
+        for (const entry of fileEntries) {
+          const nameBytes = encoder.encode(entry.name);
+          const bytes = entry.bytes instanceof Uint8Array ? entry.bytes : encoder.encode(String(entry.bytes ?? ""));
+          const checksum = crc32(bytes);
+
+          const local = new Uint8Array(30 + nameBytes.length);
+          writeUint32(local, 0, 0x04034b50);
+          writeUint16(local, 4, 20);
+          writeUint16(local, 6, 0x0800);
+          writeUint16(local, 8, 0);
+          writeUint16(local, 10, 0);
+          writeUint16(local, 12, 0);
+          writeUint32(local, 14, checksum);
+          writeUint32(local, 18, bytes.length);
+          writeUint32(local, 22, bytes.length);
+          writeUint16(local, 26, nameBytes.length);
+          writeUint16(local, 28, 0);
+          local.set(nameBytes, 30);
+          localParts.push(local, bytes);
+
+          const central = new Uint8Array(46 + nameBytes.length);
+          writeUint32(central, 0, 0x02014b50);
+          writeUint16(central, 4, 20);
+          writeUint16(central, 6, 20);
+          writeUint16(central, 8, 0x0800);
+          writeUint16(central, 10, 0);
+          writeUint16(central, 12, 0);
+          writeUint16(central, 14, 0);
+          writeUint32(central, 16, checksum);
+          writeUint32(central, 20, bytes.length);
+          writeUint32(central, 24, bytes.length);
+          writeUint16(central, 28, nameBytes.length);
+          writeUint16(central, 30, 0);
+          writeUint16(central, 32, 0);
+          writeUint16(central, 34, 0);
+          writeUint16(central, 36, 0);
+          writeUint32(central, 38, 0);
+          writeUint32(central, 42, offset);
+          central.set(nameBytes, 46);
+          centralParts.push(central);
+
+          offset += local.length + bytes.length;
+        }
+
+        const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
+        const end = new Uint8Array(22);
+        writeUint32(end, 0, 0x06054b50);
+        writeUint16(end, 4, 0);
+        writeUint16(end, 6, 0);
+        writeUint16(end, 8, fileEntries.length);
+        writeUint16(end, 10, fileEntries.length);
+        writeUint32(end, 12, centralSize);
+        writeUint32(end, 16, offset);
+        writeUint16(end, 20, 0);
+
+        return new Blob([...localParts, ...centralParts, end], { type: "application/zip" });
+      }
+
+      function extensionFromMime(mimeType) {
+        if (mimeType === "image/jpeg") return "jpg";
+        if (mimeType === "image/webp") return "webp";
+        if (mimeType === "image/svg+xml") return "svg";
+        return "png";
+      }
+
+      function safeAssetName(asset) {
+        return String(asset.id ?? "asset").replace(/[^a-zA-Z0-9._-]/g, "_");
+      }
+
+      function buildMigrationPackage(documentData) {
+        const document = JSON.parse(JSON.stringify(documentData));
+        const manifestAssets = [];
+        const files = [];
+
+        for (const asset of document.assets ?? []) {
+          const manifestAsset = {
+            id: asset.id,
+            type: asset.type ?? "image",
+            mimeType: asset.mimeType ?? "application/octet-stream",
+            path: null,
+            sizeBytes: Number(asset.sizeBytes ?? 0),
+            checksum: asset.checksum ?? null,
+            width: asset.width ?? null,
+            height: asset.height ?? null,
+            sourceNodeIds: asset.sourceNodeIds ?? [],
+            fallbackUri: asset.uri ?? null
+          };
+
+          if (asset.data) {
+            const extension = extensionFromMime(asset.mimeType);
+            const path = `assets/${safeAssetName(asset)}.${extension}`;
+            const bytes = base64ToBytes(asset.data);
+            manifestAsset.path = path;
+            manifestAsset.sizeBytes = bytes.length;
+            manifestAsset.checksum = String(crc32(bytes));
+            files.push({ name: path, bytes });
+            asset.transport = "package";
+            asset.path = path;
+            asset.uri = asset.uri ?? null;
+            asset.data = null;
+            asset.sizeBytes = bytes.length;
+            asset.checksum = manifestAsset.checksum;
+          }
+
+          manifestAssets.push(manifestAsset);
+        }
+
+        const manifest = {
+          packageVersion: "0.1.0",
+          createdAt: new Date().toISOString(),
+          documentPath: "document.json",
+          diagnosticsPath: "diagnostics.json",
+          assets: manifestAssets
+        };
+
+        files.unshift(
+          { name: "document.json", bytes: encoder.encode(JSON.stringify(document, null, 2)) },
+          { name: "manifest.json", bytes: encoder.encode(JSON.stringify(manifest, null, 2)) },
+          { name: "diagnostics.json", bytes: encoder.encode(JSON.stringify(document.diagnostics ?? [], null, 2)) }
+        );
+
+        return {
+          blob: createStoredZip(files),
+          manifest
+        };
+      }
+
       $("page").onclick = () => {
         setBusy(true);
         setStatus("busy", "已发送解析当前页面指令。");
@@ -372,13 +559,15 @@
       $("copy").onclick = async () => {
         if (!state.lastResult?.document) return;
         await copyText(JSON.stringify(state.lastResult.document, null, 2));
-        pushLog("导出 JSON 已复制");
+        pushLog("结构 JSON 已复制（仅调试预览，正式方案需 .mgfig 资源包）");
       };
 
       $("download").onclick = () => {
         if (!state.lastResult?.document) return;
-        downloadJson("mg-to-fig-document.json", state.lastResult.document);
-        pushLog("导出 JSON 下载已触发");
+        const { blob, manifest } = buildMigrationPackage(state.lastResult.document);
+        downloadBlob("mg-to-fig-package.mgfig", blob);
+        const packagedAssets = manifest.assets.filter((asset) => asset.path).length;
+        pushLog(`.mgfig 迁移包下载已触发: packagedAssets=${packagedAssets}, fallbackAssets=${manifest.assets.length - packagedAssets}`);
       };
 
       $("diagnose").onclick = () => {

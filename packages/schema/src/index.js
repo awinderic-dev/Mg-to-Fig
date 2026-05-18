@@ -6,6 +6,7 @@ export const ERROR_CODES = {
   LAYOUT_CONFLICT: "E_LAYOUT_CONFLICT",
   COMPONENT_BIND_FAIL: "E_COMPONENT_BIND_FAIL",
   ASSET_MISSING: "E_ASSET_MISSING",
+  ASSET_DEGRADED: "E_ASSET_DEGRADED",
   FONT_FALLBACK: "E_FONT_FALLBACK",
   TOKEN_BIND_PENDING: "E_TOKEN_BIND_PENDING"
 };
@@ -22,15 +23,15 @@ export function createEmptyDocumentMeta(overrides = {}) {
   };
 }
 
-export function createDiagnostic({
-  level = "info",
-  code,
-  message,
-  nodeId = null,
-  assetId = null,
-  fallbackApplied = false,
-  details = {}
-}) {
+export function createDiagnostic(input) {
+  const source = input || {};
+  const level = source.level ?? "info";
+  const code = source.code;
+  const message = source.message;
+  const nodeId = source.nodeId ?? null;
+  const assetId = source.assetId ?? null;
+  const fallbackApplied = source.fallbackApplied ?? false;
+  const details = source.details ?? {};
   return {
     level,
     code,

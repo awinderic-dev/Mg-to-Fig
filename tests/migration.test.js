@@ -286,6 +286,37 @@ test("exportFromMasterGo should prefer image fills when node raster export faile
   assert.equal(document.diagnostics.some((item) => item.code === "E_ASSET_MISSING"), false);
 });
 
+test("exportFromMasterGo should drop node imageRef when raster export has no usable transport", () => {
+  const { document, validation } = exportFromMasterGo({
+    roots: [
+      {
+        id: "image-fill",
+        type: "RECTANGLE",
+        name: "Image Fill",
+        image: {
+          id: "image-fill-image",
+          base64: "a".repeat(130 * 1024),
+          sizeBytes: 130 * 1024,
+          width: 446,
+          height: 262
+        },
+        fills: [{
+          type: "IMAGE",
+          imageRef: "104581334761000/166632337784586/image.png",
+          scaleMode: "FILL"
+        }],
+        children: []
+      }
+    ]
+  });
+
+  assert.equal(validation.valid, true);
+  assert.equal(document.nodes[0].imageRef, null);
+  assert.equal(document.nodes[0].style.fills[0].type, "IMAGE_REF");
+  assert.deepEqual(document.assets.map((asset) => asset.id), ["image-fill-fill-0"]);
+  assert.ok(document.diagnostics.some((item) => item.assetId === "image-fill-image"));
+});
+
 
 test("exportFromMasterGo should skip PAGE root and keep children top-level", () => {
   const { document, validation } = exportFromMasterGo({

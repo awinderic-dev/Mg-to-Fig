@@ -2,9 +2,11 @@
   "name": "Mg to Fig Importer",
   "id": "mg-to-fig-importer",
   "api": "1.0.0",
-  "main": "src/main.js",
-  "ui": "src/ui.html",
-  "editorType": ["figma"],
+  "main": "main.js",
+  "ui": "ui.html",
+  "editorType": [
+    "figma"
+  ],
   "menu": [
     {
       "name": "导入 Mg-to-Fig 迁移包",
@@ -23,6 +25,8 @@
     }
   ],
   "networkAccess": {
-    "allowedDomains": ["https://image-resource.mastergo.com"]
+    "allowedDomains": [
+      "https://image-resource.mastergo.com"
+    ]
   }
 }

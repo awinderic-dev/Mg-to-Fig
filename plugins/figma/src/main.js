@@ -14,7 +14,7 @@ if (figma.command?.startsWith("postprocess:")) {
   figma.commitUndo();
   figma.closePlugin();
 } else {
-  figma.showUI(__html__, { width: 360, height: 320 });
+  figma.showUI(__html__, { width: 380, height: 380 });
 
   figma.ui.onmessage = async (msg) => {
     if (msg.type === "import:reset-session") {

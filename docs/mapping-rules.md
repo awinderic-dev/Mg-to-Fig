@@ -44,7 +44,7 @@
 - `#RRGGBB` -> `SOLID`
 - `rgba(...)` -> `SOLID + opacity`
 - `linear-gradient(...)` -> `GRADIENT_LINEAR`
-- 图片 URL -> `IMAGE_REF` + `assets[]` 记录，导入阶段优先按资产解析
+- 图片 URL/二进制引用 -> `IMAGE_REF` + 资源包 `manifest.assets[]` 记录，导入阶段优先按包内文件解析
 
 ### 5.2 Stroke
 
@@ -101,29 +101,42 @@
 
 ## 10. 图片与图标（插件落地规则）
 
-### 10.1 图片迁移（双插件主链路）
+### 10.1 迁移包主链路
+
+- 正式交付物是 `.mgfig` zip 包，包含：
+  - `document.json`：节点、布局、样式、组件、token、资源引用。
+  - `manifest.json`：资源索引、文件路径、hash、mimeType、尺寸、来源节点。
+  - `assets/`：图片、icon、遮罩、SVG 等真实资源文件。
+  - `diagnostics.json`：导出阶段诊断。
+- 单独 `document.json` 只能作为调试/预检格式，不得承诺完整迁移图片与 icon。
+
+### 10.2 图片迁移（双插件主链路）
 
 - **MasterGo 插件导出阶段**
-  - 从样式库 `paint_*` 中识别图片资源（URL/二进制引用）。
-  - 生成统一 `assets[]` 记录：`assetId/hash/mimeType/sizeBytes/transport/data|uri`。
-  - 小图（阈值内）写入 `data(base64)`；大图写 `uri` 并记录分包信息。
-  - 节点仅保存 `imageRef`，不直接依赖运行时临时 URL。
+  - 从样式库 `paint_*`、节点 fill、IMAGE 节点中识别图片资源。
+  - 尽量通过插件 API 导出真实二进制，写入 `assets/<assetId>.<ext>`。
+  - 生成 `manifest.assets[]`：`assetId/path/hash/mimeType/sizeBytes/width/height/sourceNodeIds`。
+  - 节点仅保存 `imageRef`/`IMAGE_REF.assetId`，不直接依赖运行时临时 URL。
+  - 若只能拿到远程 URL，写入 `fallbackUri` 并输出警告；该 URL 不算主链路成功。
 - **Figma 插件导入阶段**
-  - 优先使用 `assets.data` -> `figma.createImage(Uint8Array)` 写入 IMAGE paint。
-  - 次级回退使用 `assets.uri` -> `figma.createImageAsync(uri)`（需 manifest 白名单域名）。
+  - 优先读取包内文件 bytes -> `figma.createImage(Uint8Array)` 写入 IMAGE paint。
+  - 次级兼容 `assets.data` -> `figma.createImage(Uint8Array)`。
+  - 最后兜底使用 `fallbackUri`/`assets.uri` -> `figma.createImageAsync(uri)`（需 manifest 白名单域名）。
   - 失败时降级为占位色并输出 `E_ASSET_MISSING`（包含 `nodeId/assetId`）。
 
-### 10.2 图标迁移（PATH/VECTOR）
+### 10.3 图标迁移（PATH/VECTOR/SVG）
 
 - 导出时保留原始 `path[].data`，并额外输出归一化版本（命令与参数空格标准化）。
+- 能导出 SVG 时，同时写入 `assets/<assetId>.svg` 并在 manifest 中标记 `type=svg`。
 - 导入时优先走 `vectorPaths`（可编辑矢量）；若路径不被 Figma 接受：
   - 回退 `createNodeFromSvg`（保持视觉不丢失）；
+  - 若 SVG 也不可用，最后降级为包内 PNG；
   - 同时写 `pluginData` 标记该节点为 SVG 回退，便于后续修复。
 - 图标容器（如 `icon-wrapper`）必须保持尺寸与 Auto Layout 语义，不允许因图标失败影响父布局。
 
-### 10.3 稳定性约束
+### 10.4 稳定性约束
 
-- 不允许在插件主链路依赖“会话态 fetch”去拉图；应以 `assets[]` 为主数据源。
+- 不允许在插件主链路依赖“会话态 fetch”去拉图；应以 `.mgfig/assets/` 为主数据源。
 - 图片、图标失败不能中断整页导入；必须节点级降级并继续。
 - 所有降级都要进入 `diagnostics[]`，支持批量复跑与问题定位。
 - 对 SK 导入后的 Figma 后处理，原则是“补属性，不重建资源节点”：
@@ -131,21 +144,21 @@
   - 因此后处理器优先修复 Auto Layout、尺寸、遮罩、效果和文本，不主动替换 PATH、IMAGE、INSTANCE。
   - 全尺寸首层矩形/椭圆遮罩可将 fill/stroke/effect/radius 提升到父级；其他节点不做删除式修复。
 
-### 10.4 批量导入会话
+### 10.5 批量导入会话
 
 - 同一次插件会话内维护 `mgSourceNodeId -> Figma Node` 映射。
 - 分片导入时，后续批次必须复用前序批次父节点，避免子节点被错误挂到当前页。
 - 每个导入节点写入 `pluginData.mgSourceNodeId`，用于会话恢复与问题定位。
 
-### 10.5 字体预检
+### 10.6 字体预检
 
 - 导入前读取 Figma 当前可用字体列表。
 - 字体匹配顺序：用户规则精确匹配 -> 用户 family 映射 -> 当前文件可用同 family 字体 -> Inter/首个可用字体。
 - 每次导入输出 `fontPreflight`，记录请求字体、解析字体、命中策略和回退数量。
 
-### 10.6 风险预检
+### 10.7 风险预检
 
 - 每次导入输出 `preflight`，统计节点数、资产数、图片引用数。
-- 预检会列出缺失的 `IMAGE_REF` 资产引用，导入阶段仍会降级为占位色并继续。
-- 预检会标记宽或高超过 4096 的图片资产，便于导出侧提前分包或降采样。
+- 预检会列出缺失的 `IMAGE_REF` 资产引用、包内文件缺失、hash 不匹配，导入阶段仍会降级为占位色并继续。
+- 预检会标记宽或高超过 4096 的图片资产，便于导出侧提前分片、降采样或保留原图引用。
 - 预检会列出当前导入器不支持的节点类型。

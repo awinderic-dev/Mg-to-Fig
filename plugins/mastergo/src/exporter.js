@@ -177,6 +177,8 @@ function collectNodeAsset(node, options, assets, assetIds, diagnostics) {
     assetInlineLimitBytes: options.assetInlineLimitBytes
   }, diagnostics);
 
+  if (asset?.transport === "external" && !asset.uri) return null;
+
   addAsset(asset, assets, assetIds);
   return asset?.id ?? null;
 }

@@ -180,7 +180,7 @@ function nodeDepth(nodeById, nodeId, memo = new Map()) {
 function sortNodesForImport(nodes) {
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const depthMemo = new Map();
-  return [...nodes].sort((a, b) => {
+  return nodes.slice().sort((a, b) => {
     const da = nodeDepth(nodeById, a.id, depthMemo);
     const db = nodeDepth(nodeById, b.id, depthMemo);
     if (da !== db) return da - db;
@@ -637,7 +637,7 @@ export function buildParameterDiffReport(sourceNodes, createdBySourceId) {
     if (typeof g.height === "number" && !compareNumberish(targetNode.height, g.height)) {
       nodeMismatches.push({ field: "height", expected: g.height, actual: targetNode.height });
     }
-    nodeMismatches.push(...compareStyleParam(targetNode, sourceNode));
+    nodeMismatches.push.apply(nodeMismatches, compareStyleParam(targetNode, sourceNode));
 
     if (sourceNode.type === "TEXT" && sourceNode.text) {
       if (!compareNumberish(targetNode.fontSize, sourceNode.text.fontSize)) {
@@ -703,7 +703,7 @@ export async function importToFigma({
   availableFonts = null
 }) {
   const validation = validateDocument(document);
-  const diagnostics = [...(document.diagnostics ?? [])];
+  const diagnostics = (document.diagnostics ?? []).slice();
   if (!validation.valid) {
     return {
       createdNodes: [],

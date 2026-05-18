@@ -1,6 +1,18 @@
-# JSON Schema v0 字段字典（Mg-to-Fig）
+# 迁移包与 JSON Schema v0 字段字典（Mg-to-Fig）
 
-## 1. 顶层结构
+## 1. 迁移包结构
+
+正式迁移交付物为 `.mgfig` zip 包，而不是单个 JSON 文件。单个 `document.json` 只用于调试、预检或低保真兜底。
+
+```text
+document.json
+manifest.json
+diagnostics.json
+assets/
+  <assetId>.png|jpg|webp|svg
+```
+
+## 2. document.json 顶层结构
 
 ```json
 {
@@ -13,7 +25,9 @@
 }
 ```
 
-## 2. documentMeta
+`assets[]` 是兼容字段。正式 `.mgfig` 导入应优先读取 `manifest.json.assets[]` 与包内 `assets/` 文件。
+
+## 3. documentMeta
 
 - `sourceTool`: string，固定为 `mastergo`
 - `exportMode`: string，`currentPage` | `selection`
@@ -22,7 +36,7 @@
 - `sourcePageId`: string，源页面标识
 - `sourcePageName`: string，源页面名称
 
-## 3. nodes[]
+## 4. nodes[]
 
 - `id`: string，源节点 ID
 - `type`: string，节点类型（FRAME/GROUP/TEXT/RECTANGLE/VECTOR/IMAGE/COMPONENT/INSTANCE）
@@ -45,7 +59,7 @@
 - `style`:
   - `fills`: array
     - 普通 Figma paint 可直接透传
-    - 图片资源使用 `{ "type": "IMAGE_REF", "assetId": "...", "scaleMode": "FILL" }`，通过 `assets[]` 解析
+    - 图片资源使用 `{ "type": "IMAGE_REF", "assetId": "...", "scaleMode": "FILL" }`，通过 `manifest.json` / `assets[]` 解析
   - `strokes`: array
   - `effects`: array
   - `opacity`: number
@@ -65,27 +79,46 @@
   - `letterSpacing`: number
   - `textAlignHorizontal`: string
   - `textAlignVertical`: string
-- `imageRef`（仅 IMAGE）: string，关联 `assets[].id`
+- `imageRef`（仅 IMAGE）: string，关联 `manifest.assets[].id` 或兼容字段 `assets[].id`
 - `componentRef`（仅 COMPONENT/INSTANCE）:
   - `componentKey`: string
   - `instanceOf`: string | null
   - `overrides`: object
 - `tokenRefs`: array，节点使用的 token 引用
 
-## 4. assets[]
+## 5. manifest.json
+
+- `packageVersion`: string
+- `createdAt`: string
+- `documentPath`: string，通常为 `document.json`
+- `diagnosticsPath`: string，通常为 `diagnostics.json`
+- `assets`: array
+  - `id`: string
+  - `type`: string，`image` | `svg` | `mask` | `other`
+  - `mimeType`: string
+  - `path`: string，例如 `assets/icon-home.svg`
+  - `sizeBytes`: number
+  - `checksum`: string
+  - `width`: number | null
+  - `height`: number | null
+  - `sourceNodeIds`: string[]
+  - `fallbackUri`: string | null，外链兜底，不作为主链路
+
+## 6. assets[] 兼容字段
 
 - `id`: string
-- `type`: string，`image` | `svg` | `other`
+- `type`: string，`image` | `svg` | `mask` | `other`
 - `mimeType`: string
 - `sizeBytes`: number
-- `transport`: string，`inline` | `external` | `chunked`
-- `uri`: string（external/chunked）
-- `data`: string（inline，base64）
+- `transport`: string，`package` | `inline` | `external` | `chunked`
+- `path`: string（package）
+- `uri`: string（external/chunked fallback）
+- `data`: string（inline，base64，仅调试或小资源兜底）
 - `checksum`: string（可选）
 - `width`: number | null（可选）
 - `height`: number | null（可选）
 
-## 5. tokens[]
+## 7. tokens[]
 
 - `tokenId`: string
 - `path`: string（例如 `color.brand.primary`）
@@ -95,7 +128,7 @@
 - `usageNodeIds`: string[]
 - `bindingStatus`: string，`tracked` | `pending` | `bound`
 
-## 6. diagnostics[]
+## 8. diagnostics[]
 
 - `level`: string，`info` | `warn` | `error`
 - `code`: string（见 PRD 错误码）
@@ -105,7 +138,7 @@
 - `fallbackApplied`: boolean
 - `details`: object
 
-## 7. 版本演进规则
+## 9. 版本演进规则
 
 - `schemaVersion` 使用 semver。
 - 小版本升级（0.x.y）允许新增可选字段，不破坏已有消费方。
